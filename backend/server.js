@@ -2,104 +2,127 @@ require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
+const multer = require("multer");
+const path = require("path");
 
-const Car = require("./models/carmodel"); // Import Car model
-
+const Car = require("./models/carmodel");
+const authRoutes = require("./routes/authRoutes");  // Ensure this path is correct
+const storeData = require('./data/storedata');  // Import the mock store data (accessories)
 const app = express();
 const PORT = process.env.PORT || 4000;
-const MONGO_URI = process.env.MONGO_URI;
 
-// ✅ Middleware
-app.use(express.json());
-app.use(cors());
-app.use("/uploads", express.static("uploads")); // Serve static images
-
-// ✅ Check if MONGO_URI is defined
-if (!MONGO_URI) {
-  console.error("❌ ERROR: MONGO_URI is not defined. Check your .env file.");
-  process.exit(1);
+// Check if MongoDB URI is available
+if (!process.env.MONGO_URI) {
+  console.error("❌ MongoDB URI is missing in the environment variables");
+  process.exit(1); // Terminate if the URI is missing
 }
 
-// ✅ Connect to MongoDB
-mongoose
-  .connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, path.join(__dirname, 'uploads'));
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit per file
+  }
+});
+
+// Enable CORS
+app.use(cors({
+  origin: 'http://localhost:7777',  // Update with your frontend's URL (React app)
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type'],
+}));
+
+// Increase payload size limits
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Serve static files from the uploads directory
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// MongoDB Connection
+mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => console.log("✅ MongoDB Connected Successfully"))
   .catch((err) => {
     console.error("❌ MongoDB Connection Failed:", err.message);
-    process.exit(1);
+    process.exit(1); // Terminate if there's a database connection issue
   });
 
-// ✅ API: Get All Cars
-app.get("/api/cars", async (req, res) => {
+// ROUTES
+
+// Create Car Post with file upload
+app.post("/cars/create", upload.array('images', 5), async (req, res) => {
   try {
-    const { search, price_gte, price_lte, year_gte, year_lte, category } = req.query;
-
-    let query = {};
-
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { category: { $regex: search, $options: "i" } },
-        { location: { $regex: search, $options: "i" } }
-      ];
+    const carData = req.body;
+    
+    // Add image paths to car data
+    if (req.files && req.files.length > 0) {
+      carData.images = req.files.map(file => `http://localhost:4000/uploads/${file.filename}`);
+      console.log('Uploaded images:', carData.images); // Debug log
     }
 
-    if (category) {
-      query.category = category;
-    }
+    const newCar = new Car(carData);
+    await newCar.save();
+    console.log('Saved car data:', newCar); // Debug log
+    res.status(201).json({ message: "Post created successfully", car: newCar });
+  } catch (error) {
+    console.error("❌ Error creating post:", error);
+    res.status(500).json({ error: "Failed to create post" });
+  }
+});
 
-    if (price_gte || price_lte) {
-      query.price = {};
-      if (price_gte) query.price.$gte = parseInt(price_gte);
-      if (price_lte) query.price.$lte = parseInt(price_lte);
-    }
-
-    if (year_gte || year_lte) {
-      query.year = {};
-      if (year_gte) query.year.$gte = parseInt(year_gte);
-      if (year_lte) query.year.$lte = parseInt(year_lte);
-    }
-
-    console.log("📌 Filter Query:", query); // Debugging
-
-    const cars = await Car.find(query);
+// Fetch Car Posts
+app.get("/cars", async (req, res) => {
+  try {
+    const cars = await Car.find();
+    console.log('Fetched cars:', cars); // Debug log
     res.json(cars);
   } catch (error) {
-    console.error("❌ Error fetching cars:", error);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Failed to fetch cars" });
   }
 });
 
-// ✅ API: Add a New Car
-app.post("/api/cars", async (req, res) => {
+// Fetch Store Accessories with Search and Price Filters
+app.get("/store/accessories", (req, res) => {
   try {
-    const newCar = new Car(req.body);
-    await newCar.save();
-    res.status(201).json(newCar);
+    const { search, minPrice, maxPrice } = req.query;
+    let filteredData = [...storeData]; // Create a copy of the store data
+
+    // Apply search filter (case-insensitive)
+    if (search) {
+      filteredData = filteredData.filter(item => 
+        item.pname.toLowerCase().includes(search.toLowerCase())
+      );
+    }
+
+    // Apply price filter
+    if (minPrice && maxPrice) {
+      filteredData = filteredData.filter(item => 
+        item.price >= parseFloat(minPrice) && item.price <= parseFloat(maxPrice)
+      );
+    }
+
+    res.json(filteredData);  // Return filtered accessories only
   } catch (error) {
-    console.error("❌ Error adding car:", error);
-    res.status(500).json({ error: "Failed to add car" });
+    res.status(500).json({ error: "Failed to fetch accessories" });
   }
 });
 
-// ✅ API: Delete a Car
-app.delete("/api/cars/:id", async (req, res) => {
-  try {
-    await Car.findByIdAndDelete(req.params.id);
-    res.json({ message: "Car deleted successfully" });
-  } catch (error) {
-    console.error("❌ Error deleting car:", error);
-    res.status(500).json({ error: "Failed to delete car" });
-  }
-});
+// User Authentication Routes
+app.use('/user', authRoutes);  // Register user authentication routes
 
-// ✅ Root Route
-app.get("/", (req, res) => {
-  res.send("🚗 Welcome to WheelMate API!");
-  console.log("📌 GET request received on /");
-});
+// Default route for testing API
+app.get("/", (req, res) => res.send("🚗 AutoBidUp Backend Ready"));
 
-// ✅ Start the Server
+// Start server
 app.listen(PORT, () => {
-  console.log(`🚀 Server Running on Port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
